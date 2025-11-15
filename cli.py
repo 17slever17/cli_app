@@ -1,6 +1,8 @@
 import argparse
 import json
 import sys
+import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 class CLI_App:
@@ -63,23 +65,76 @@ class CLI_App:
         if not isinstance(self.params["filter_substring"], str):
             raise Exception("Параметр 'filter_substring' должен быть строкой.")
 
-    def print_params(self):
-        print("=== Настройки приложения ===")
-        for key, value in self.params.items():
-            print(f"{key}: {value}")
-        print("============================")
+    def get_pom_url(self):
+        repo = self.params["repo_url"].rstrip('/')
+        group_id, artifact_id = self.params["package_name"].split(":")
+        version = self.params["version"]
+
+        group_path = group_id.replace(".", "/")
+        pom_url = f"{repo}/{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
+        return pom_url
+
+    def download_pom(self, pom_url):
+        try:
+            with urllib.request.urlopen(pom_url) as response:
+                return response.read().decode("utf-8")
+        except Exception as e:
+            raise Exception(f"Не удалось загрузить POM-файл по адресу {pom_url}: {e}")
+
+    def parse_dependencies(self, pom_content):
+        try:
+            root = ET.fromstring(pom_content)
+        except Exception as e:
+            raise Exception(f"Ошибка парсинга XML POM: {e}")
+
+        ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
+        deps = []
+        for dep in root.findall(".//m:dependencies/m:dependency", ns):
+            group_id = dep.findtext("m:groupId", default="", namespaces=ns)
+            artifact_id = dep.findtext("m:artifactId", default="", namespaces=ns)
+            version = dep.findtext("m:version", default="(не указана)", namespaces=ns)
+            scope = dep.findtext("m:scope", default="compile", namespaces=ns)
+
+            filt = self.params["filter_substring"]
+            if filt and filt not in group_id and filt not in artifact_id:
+                continue
+
+            deps.append({
+                "groupId": group_id,
+                "artifactId": artifact_id,
+                "version": version,
+                "scope": scope
+            })
+
+        return deps
+
+    def show_dependencies(self):
+        pom_url = self.get_pom_url()
+        print(f"Загружается POM-файл: {pom_url}")
+
+        pom_content = self.download_pom(pom_url)
+        dependencies = self.parse_dependencies(pom_content)
+
+        if not dependencies:
+            print("Нет зависимостей (или фильтр исключил все).")
+            return
+
+        print("\n=== Зависимости пакета ===")
+        for dep in dependencies:
+            print(f"{dep['groupId']}:{dep['artifactId']}:{dep['version']} (scope={dep['scope']})")
+        print("=================================\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CLI-приложение для чтения конфигурации из JSON (этап 1).")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--config", "-c", default="config.json", help="Путь к JSON файлу конфигурации")
     args = parser.parse_args()
 
     try:
         cli = CLI_App(args.config)
-        cli.print_params()
+        cli.show_dependencies()
     except Exception as e:
-        print(f"[ОШИБКА КОНФИГУРАЦИИ] {e}", file=sys.stderr)
+        print(f"[ОШИБКА] {e}", file=sys.stderr)
         sys.exit(1)
 
 
